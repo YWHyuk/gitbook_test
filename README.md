@@ -116,6 +116,16 @@
 | **Width** | Edit the line width |
 | **Visibility** | Set the line’s visibility |
 
+#### If you want to draw average, check the average's visibility checkbox.
+
+![](.gitbook/assets/average.PNG)
+
+#### After that, you can see the average line
+
+![](.gitbook/assets/aplly.png)
+
+
+
 ####     5.3. Save button
 
 ![](.gitbook/assets/save.png)
