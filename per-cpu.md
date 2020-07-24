@@ -38,7 +38,60 @@ map은 unit 내의 할당 정보를 저장하고 있는 벡터이며, 할당된/
 
 ![](.gitbook/assets/unit_map.png)
 
-마지막으로 page는 가상 주소 영역에 할당&매핑된 물리 페이지 디스크립터 배열을 의미한다.
+해당 자료 구조의 특성으로 새로운 엔트리가 삽입될 때, 다시 map를 갱신해야 한다. 할당 가능한 연속된 영역을  전부 사용한다면 단순히 음수로 변경하면 되지만, 일부만 사용한다면 영역은 쪼개지개 되며 새로운 엔트리를 생성해야 한다. 
+
+![](.gitbook/assets/head.png)
+
+이 역할을 수행하는 함수가 **pcpu\_split\_block**이다. 새롭게 생겨나는 앞 쪽 영역을 head, 뒤 쪽 영역을 tail이라 하며 인자로 해당 영역들의 크기를 넘겨준다.
+
+```c
+static int pcpu_split_block(struct pcpu_chunk *chunk, int i, int head, int tail)
+{
+    int nr_extra = !!head + !!tail;
+    int target = chunk->map_used + nr_extra;
+
+    /* reallocation required? */
+    if (chunk->map_alloc < target) {
+        int new_alloc = chunk->map_alloc;
+        int *new;
+        while (new_alloc < target)
+            new_alloc *= 2;
+
+        new = pcpu_realloc(chunk->map,
+                   chunk->map_alloc * sizeof(new[0]),
+                   new_alloc * sizeof(new[0]));
+        if (!new)
+            return -ENOMEM;
+
+        chunk->map_alloc = new_alloc;
+        chunk->map = new;
+    }
+
+    /* insert a new subblock */
+    memmove(&chunk->map[i + nr_extra], &chunk->map[i],
+        sizeof(chunk->map[0]) * (chunk->map_used - i));
+    chunk->map_used += nr_extra;
+
+    /* head와 tail을 빼는 이유는 무엇인가? */
+    if (head) {
+        chunk->map[i + 1] = chunk->map[i] - head;
+        chunk->map[i++] = head;
+    }
+    if (tail) {
+        chunk->map[i++] -= tail;
+        chunk->map[i] = tail;
+    }
+    return 0;
+}
+```
+
+* **Line 3~4**: 새롭게 생성되는 영역의 수를 nr\_extra에 저장하고 target에 늘어난 엔트리의 수를 저장한다.
+* **Line 7~21**: map 벡터의 크기가 작다면 늘린다.
+* **Line 24~26**: i번째 이후 엔트리들은 nr\_extra만큼 시프트한다. chunk의 엔트리 수를 업데이트한다.
+* **Line 29~31**: head가 존재한다면 head를 위한 엔트리를 생성한다.
+* **Line 33~36**: tail이 존재한다면 tail을 위한 엔트리를 생성한다.
+
+마지막으로 **page**는 가상 주소 영역에 할당&매핑된 물리 페이지 디스크립터 배열을 의미한다.
 
 ## Chunk searching
 
@@ -52,16 +105,20 @@ static struct list_head *pcpu_slot;     /* chunk list slots */
 #define PCPU_SLOT_BASE_SHIFT        5   /* 1-31 shares the same slot */
 ```
 
- 버디 할당자처럼, chunk의 free size에 따라 청크가 위치하는 슬롯이 다르다.
+ 버디 할당자처럼, chunk의 free size에 따라 청크가 위치하는 슬롯이 다르다. 
 
 {% tabs %}
 {% tab title="pcpu\_size\_to\_slot" %}
 ```c
+#define PCPU_SLOT_BASE_SHIFT        5   /* 1-31 shares the same slot */
+
+...
+
 static int pcpu_size_to_slot(int size)
 {
     int highbit = fls(size);     /* ilog2(size) */
     
-    /* size가 16미만일때(=high bit가 3이하일때), slot index는 1 */
+    /* high bit가 4이하일때, slot index는 1 */
     return max(highbit - PCPU_SLOT_BASE_SHIFT + 2, 1);
 }
 ```
@@ -75,6 +132,22 @@ static int pcpu_chunk_slot(const struct pcpu_chunk *chunk)
         return 0;
 
     return pcpu_size_to_slot(chunk->free_size);
+}
+```
+{% endtab %}
+
+{% tab title="pcpu\_chunk\_relocate" %}
+```c
+static void pcpu_chunk_relocate(struct pcpu_chunk *chunk, int oslot)
+{
+    int nslot = pcpu_chunk_slot(chunk);
+
+    if (oslot != nslot) {
+        if (oslot < nslot)
+            list_move(&chunk->list, &pcpu_slot[nslot]);
+        else
+            list_move_tail(&chunk->list, &pcpu_slot[nslot]);
+    }
 }
 ```
 {% endtab %}
@@ -229,9 +302,54 @@ static int pcpu_alloc_area(struct pcpu_chunk *chunk, int size, int align)
 ```
 {% endtab %}
 
-{% tab title="" %}
-```
+{% tab title="pcpu\_populate\_chunk" %}
+```c
+static int pcpu_populate_chunk(struct pcpu_chunk *chunk, int off, int size)
+{
+    const gfp_t alloc_mask = GFP_KERNEL | __GFP_HIGHMEM | __GFP_COLD;
+    int page_start = PFN_DOWN(off);
+    int page_end = PFN_UP(off + size);
+    int map_start = -1;
+    int map_end;
+    unsigned int cpu;
+    int i;
 
+    for (i = page_start; i < page_end; i++) {
+        if (pcpu_chunk_page_occupied(chunk, i)) {
+            if (map_start >= 0) {
+                if (pcpu_map(chunk, map_start, map_end))
+                    goto err;
+                map_start = -1;
+            }
+            continue;
+        }
+
+        map_start = map_start < 0 ? i : map_start;
+        map_end = i + 1;
+
+        for_each_possible_cpu(cpu) {
+            struct page **pagep = pcpu_chunk_pagep(chunk, cpu, i);
+
+            *pagep = alloc_pages_node(cpu_to_node(cpu),
+                          alloc_mask, 0);
+            if (!*pagep)
+                goto err;
+        }
+    }
+
+    if (map_start >= 0 && pcpu_map(chunk, map_start, map_end))
+        goto err;
+
+    for_each_possible_cpu(cpu)
+        memset(chunk->vm->addr + (cpu << pcpu_unit_shift) + off, 0,
+               size);
+
+    return 0;
+err:
+    /* likely under heavy memory pressure, give memory back */
+    pcpu_depopulate_chunk(chunk, off, size, true);
+    return -ENOMEM;
+}
 ```
 {% endtab %}
 {% endtabs %}
@@ -254,6 +372,12 @@ static int pcpu_alloc_area(struct pcpu_chunk *chunk, int size, int align)
   * **Line 81~82**: 할당한 만큼 free\_size를 조절한다. 또한 할당된 영역을 음수로 표시한다.
   * **Line 84: free\_size**가 변경되었으므로, 들어갈 슬롯도 변경한다.
 * **Line 35~43**: 찾은 offset에 대해 populate를 진행한다. 성공시 per-cpu 포인터를 리턴한다.
-
-![](.gitbook/assets/head.png)
+  * pcpu\_populate\_chunk 진입
+  * **Line 4~5**: offset과 size를 시작/마지막 페이지 인덱스로 변환한다.
+  * **Line 11**: 시작 페이지 인덱스부터 마지막 페이지 인덱스까지 순회한다.
+  * **Line 12~19**: 현재 페이지 인덱스에 할당된 물리 페이지가 있고, 이전에 새롭게 할당한\(map\_start&gt;=0\)이라면 새롭게 할당받은 물리 페이지들을 가상주소와 매핑한다.
+  * **Line 21~22**: map\_start가 설정이 안되어있다면 현재 인덱스로 설정되어 있다면 그대로 값을 유지한다. map\_end는 i+1로 설정한다.
+  * **Line 24~3**1: 현재 페이지 인덱스에 각 유닛별로 페이지를 할당한다.
+  * **Line 34**: 루프안에서 매핑 못한 페이지를 매핑한다.
+  * **Line 37~39**: 할당한 페이지들을 0으로 초기화한다.
 
