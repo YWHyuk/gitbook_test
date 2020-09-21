@@ -4,7 +4,37 @@ description: Per-CPU가 발전한 흐름을 따라가 보자.
 
 # Per CPU 분석 노트
 
-Per-cpu 할당자는 "[percpu: implement new dynamic percpu allocator](https://github.com/iamroot16/linux/commit/fbf59bc9d74d1fb30b8e0630743aff2806eafcea#diff-5050eed868076fe2656aea8c2eb7312a)"의 패치로 크게 변경되었다. 또한 뒤따르는 후속 패치들로 2800줄에 이르게 되었다. 다양한 내용이 반영된 최신의 percpu.c 파일을 분석하기보다는 기본적인 Per-cpu 설계 방향을 이해하기 위해 앞서 얘기한 커밋을 살펴보자.
+Per-cpu는 "[percpu: implement new dynamic percpu allocator](https://github.com/iamroot16/linux/commit/fbf59bc9d74d1fb30b8e0630743aff2806eafcea#diff-5050eed868076fe2656aea8c2eb7312a)"의 패치로 리뉴얼 되었다. 또한 뒤따르는 후속 패치들로 2800줄에 이르는 코드가 되었다. 다양한 내용이 반영된 최신의 percpu.c 파일을 분석하기보다는 몇 줄 안되는 초창기 버전의 percpu.c를 분석하며,  percpu란 어떻게 구현되었는지 알아보자.
+
+## Prehistoric implementation
+
+### Static percpu variable
+
+```c
+
+```
+
+### Dynamic percpu variable
+
+{% code title="include/linux/percpu.h " %}
+```c
+struct percpu_data {	
+    void *ptrs[NR_CPUS];
+};
+```
+{% endcode %}
+
+ 옛 **동적 percpu** 변수의 경우, 위와 같이 구성되며 코드를 보면 알겠다시피 매우 직관적이고 간단하다. 각각의 cpu마다 데이터를 할당하고 이들의 주소를 배열에 저장한다. 그리고 그 배열의 주소를 percpu 데이터가 가진다. 즉, 아래 그림과 같다.
+
+![](.gitbook/assets/pre-percpu.png)
+
+ 따라서 특정 cpu의 데이터에 접근하기 위해서는 2번의 메모리 참조가 필요하다. 또한,  크기가 K바이트인 자료를 percpu로 만든다고 생각하면, 실제 데이터가 저장되는 N\*K 바이트 외에도 ptrs\[\]를 만들기 위해 8\*N바이트\(64bit system\)가 요구된다.
+
+###  Reimplementation
+
+static과 dynamic을 같은 방식으로 사용할 수 있게가 포인트 일수도...
+
+
 
 주목할 내용은 **Chunk**라는 새로운 자료구조와, **vmalloc**을 활용한다는 것이다. 먼저 Chunk 구조체를 들여다 보자.
 
