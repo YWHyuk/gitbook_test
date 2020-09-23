@@ -2,17 +2,62 @@
 description: Per-CPU가 발전한 흐름을 따라가 보자.
 ---
 
-# Per CPU 분석 노트
+# Per CPU 완전 분석 노트
 
-Per-cpu는 "[percpu: implement new dynamic percpu allocator](https://github.com/iamroot16/linux/commit/fbf59bc9d74d1fb30b8e0630743aff2806eafcea#diff-5050eed868076fe2656aea8c2eb7312a)"의 패치로 리뉴얼 되었다. 또한 뒤따르는 후속 패치들로 2800줄에 이르는 코드가 되었다. 다양한 내용이 반영된 최신의 percpu.c 파일을 분석하기보다는 몇 줄 안되는 초창기 버전의 percpu.c를 분석하며,  percpu란 어떻게 구현되었는지 알아보자.
+Per-cpu는 "[percpu: implement new dynamic percpu allocator](https://github.com/iamroot16/linux/commit/fbf59bc9d74d1fb30b8e0630743aff2806eafcea#diff-5050eed868076fe2656aea8c2eb7312a)"의 패치로 리뉴얼 되었다. 또한 뒤따르는 후속 패치들로 2800줄에 이르는 코드가 되었다. 다양한 내용이 반영된 최신의 percpu.c 파일을 분석하기보다는 몇 줄 안되는 초창기 버전의 percpu.c를 분석하며, percpu란 어떻게 구현되었는지 알아보자.
 
 ## Prehistoric implementation
 
+우선 percpu가 재구현되기 전에 모습을 살펴보고, 어떤 점 때문에 대대적으로 수정되었는지 살펴보자. 재구현 이전의 percpu은 static과 dynamic이 서로 다른 구조로 구현되었고, 따라서 서로 다른 인터페이스를 가진다. 
+
 ### Static percpu variable
 
+{% code title="include/linux/percpu.h " %}
 ```c
+#define PER_CPU_BASE_SECTION ".data.percpu"
 
+#define DEFINE_PER_CPU_SECTION(type, name, section)			\
+	__attribute__((__section__(PER_CPU_BASE_SECTION section)))	\
+	PER_CPU_ATTRIBUTES __typeof__(type) per_cpu__##name
+
+#define DEFINE_PER_CPU(type, name)					\
+	DEFINE_PER_CPU_SECTION(type, name, "")
 ```
+{% endcode %}
+
+Static percpu 변수는 DEFINE\_PER\_CPU 매크로를 사용하여 선언할 수 있다. 
+
+DEFINE\_PER\_CPU 매크로는 변수를 생성하는데,
+
+1. 이 변수의 타입은 인자로 받은 type이다.
+2. 이 변수의 이름은 per\_cpu\_\_\#\#name이다.
+3. 이 변수는 .data.percpu 섹션에 위치한다.
+
+단순히 DEFINE하는 것으로 static percpu 변수로 활용할 수 없다. 사용하기 위해서는 setup\_per\_cpu\_areas\(\) 함수를 통해 초기화해야 한다. 
+
+```c
+static void __init setup_per_cpu_areas(void)
+{
+	unsigned long size, i;
+	char *ptr;
+	unsigned long nr_possible_cpus = num_possible_cpus();
+
+	/* Copy section for each CPU (we discard the original) */
+	/* PERCPU_ENOUGH_ROOM = __per_cpu_end - __per_cpu_start + PERCPU_MODULE_RESERVE */
+	size = ALIGN(PERCPU_ENOUGH_ROOM, PAGE_SIZE);
+	ptr = alloc_bootmem_pages(size * nr_possible_cpus);
+
+	for_each_possible_cpu(i) {
+		__per_cpu_offset[i] = ptr - __per_cpu_start;
+		memcpy(ptr, __per_cpu_start, __per_cpu_end - __per_cpu_start);
+		ptr += size;
+	}
+}
+```
+
+  해당 함수는 static percpu를 초기화하기 위해 필요한 용량을 구한 후 할당한다. 각각의 cpu에 대응하는 영역에 .data.percpu의 값들을 복사하고 위치를 기록한다.  
+
+![](.gitbook/assets/static.png)
 
 ### Dynamic percpu variable
 
@@ -24,19 +69,28 @@ struct percpu_data {
 ```
 {% endcode %}
 
- 옛 **동적 percpu** 변수의 경우, 위와 같이 구성되며 코드를 보면 알겠다시피 매우 직관적이고 간단하다. 각각의 cpu마다 데이터를 할당하고 이들의 주소를 배열에 저장한다. 그리고 그 배열의 주소를 percpu 데이터가 가진다. 즉, 아래 그림과 같다.
+ 옛 **Dynamic percpu 변수**의 경우, 위와 같이 선언되었으며 그 구성은 간단하다. 이를 그림으로 표현하면 아래와 같다.
 
 ![](.gitbook/assets/pre-percpu.png)
 
- 따라서 특정 cpu의 데이터에 접근하기 위해서는 2번의 메모리 참조가 필요하다. 또한,  크기가 K바이트인 자료를 percpu로 만든다고 생각하면, 실제 데이터가 저장되는 N\*K 바이트 외에도 ptrs\[\]를 만들기 위해 8\*N바이트\(64bit system\)가 요구된다.
+ 해당 구조로 인해, 
 
-###  Reimplementation
+* 데이터에 접근하기 위해 메모리 참조가 2번 필요하다.
+* 할당할 때, 실제 데이터의 크기\(CPU 개수 \* 자료형 크기\)보다  더 많은 메모리가 요구된다.
 
-static과 dynamic을 같은 방식으로 사용할 수 있게가 포인트 일수도...
+### Key point
 
+앞서 말한대로 static과 dynamic의 구조는 서로 다르다. 따라서 **서로 다른 percpu를 하나로 통합**하는 것이 주요 과제이다. 이제 이것을 어떻게 구현했는지 살펴보자.
 
+## Reimplementation
 
-주목할 내용은 **Chunk**라는 새로운 자료구조와, **vmalloc**을 활용한다는 것이다. 먼저 Chunk 구조체를 들여다 보자.
+ 새로운 dynamic percpu는 이전의 static percpu의 구조를 그대로 사용하여 통일된 percpu를 이룬다. static percpu를 초기화한 setup\_percpu\_area함수처럼, 연속된 커다란 메모리를 할당받고, cpu마다 공평하게 나눠가지도록 한다. 여기서 연속된 하나의 커다란 메모리를 **chunk**라 하고, cpu마다 분배받은 영역을 **unit**이라 한다.
+
+![&#xC55E;&#xC11C; &#xBCF8; static percpu&#xC5D0; &#xD574;&#xB2F9;&#xD558;&#xB294; &#xBA85;&#xCE6D;](.gitbook/assets/uc.png)
+
+ static percpu의 경우 chunk를 할당하고 각각의 unit에 복사하면 끝이지만, dynamic은 **unit 내의 가용 공간을 관리**해야 한다. 또한 chunk 내의 가용 공간이 부족하면 새로운 chunk를 만들어야 한다. 따라서 chunk는 여러 개일 수 있고, 특정 chunk를 **검색할 수 있도록 chunk 간 관계**를 구성해야한다. 
+
+위 내용에 초점을 맞추면서 Chunk 구조체를 들여다 보자.
 
 ```c
 struct pcpu_chunk {
@@ -56,15 +110,21 @@ struct pcpu_chunk {
 }
 ```
 
-## Chunk's internal memory management
+앞서 말한대로 chunk 내부의 멤버들은 크게 2가지로 분류된다. 첫번째로는 청크 검색을 위한 멤버, 두번째는 할당받은 메모리 관리를 위한 멤버이다. 이제 이 두 가지 종류의 멤버에 대해 자세히 알아보자.
 
-먼저 청크 내부 메모리 관리를 위한 멤버에 대해 살펴보자. **vm**은 **get\_vm\_area**를 통해 청크에 할당된 가상 주소 영역이다. 해당 가상 주소 영역은 CPU 수 만큼 나누어, 각 CPU마다 고유한 영역을 가지도록 한다. 이를 **unit**이라고 한다.
+### Chunk's internal memory management
+
+ 위에서 chunk는 할당받은 커다란 연속된 메모리라 하였다. 실제적으로는 연속된 가상 메모리를 할당받고 물리 페이지와의 매핑은 필요할 때까지 미루어진다. 즉, 멤버 변수 **vm**은 **get\_vm\_area**를 통해 청크에 할당된 가상 주소 영역이다. 
 
 ![](.gitbook/assets/chunkunit.png)
 
- 따라서, chunk에 per-cpu 변수를 할당한다는 말은 chunk 내의 각각의 유닛에 변수가 들어갈 공간을 마련한다는 말이다. 그렇기에 chunk는 유닛 내의 할당된 공간/사용 가능한 공간을 관리해야 한다. 이를 위해 **map**이 사용된다.
+ chunk는 유닛 내의 할당된 공간/사용 가능한 공간을 관리해야 한다고 말했다. 이를 위해 **map**이 사용된다.
 
-map은 unit 내의 할당 정보를 저장하고 있는 벡터이며, 할당된/할당되지 않은 연속된 주소에 대해 하나의 엔트리를 가진다. 할당된 영역은 음수로, 할당되지 않은 영역은 양수로 저장된다.
+{% hint style="info" %}
+최신 버전에서 chunk 내 메모리 관리 방식는 이와 다르며 원한다면 생략해도 된다.  
+{% endhint %}
+
+map은 unit 내의 할당 정보를 저장하고 있는 벡터이며, 할당된/할당되지 않은 연속된 범위에 대해 하나의 엔트리를 가진다. 할당된 영역은 음수로, 할당되지 않은 영역은 양수로 저장된다.
 
 ![](.gitbook/assets/unit_map.png)
 
@@ -121,11 +181,9 @@ static int pcpu_split_block(struct pcpu_chunk *chunk, int i, int head, int tail)
 * **Line 29~31**: head가 존재한다면 head를 위한 엔트리를 생성한다.
 * **Line 33~36**: tail이 존재한다면 tail을 위한 엔트리를 생성한다.
 
-마지막으로 **page**는 가상 주소 영역에 할당&매핑된 물리 페이지 디스크립터 배열을 의미한다.
+### Chunk searching
 
-## Chunk searching
-
-요청받은 크기의 per-cpu 변수를 할당하기 위해서는, 적당한 chunk를 찾아야한다. 단순하게 모든 chunk를 순회하면서 찾을 수 있지만, 효율적인 검색을 위해 **slot**을 도입했다.
+요청받은 크기의 percpu 변수를 할당하기 위해서는, 요청받은 크기를 할당 가능한 chunk를 찾아야한다. 단순하게 모든 chunk를 순회하면서 찾을 수 있지만, 효율적인 검색을 위해 **slot**을 도입했다.
 
 ```c
 static struct list_head *pcpu_slot;     /* chunk list slots */
@@ -135,7 +193,7 @@ static struct list_head *pcpu_slot;     /* chunk list slots */
 #define PCPU_SLOT_BASE_SHIFT        5   /* 1-31 shares the same slot */
 ```
 
- 버디 할당자처럼, chunk의 free size에 따라 청크가 위치하는 슬롯이 다르다. 
+ chunk의 free size에 따라 청크가 위치하는 슬롯이 다르다. 따라서 alloc/free에 의해 freesize가 변경되면 chunk를 올바른 슬롯에 재배치하는 pcpu\_chunk\_relocate를 호출해야 한다.
 
 {% tabs %}
 {% tab title="pcpu\_size\_to\_slot" %}
@@ -185,9 +243,15 @@ static void pcpu_chunk_relocate(struct pcpu_chunk *chunk, int oslot)
 
 ![&amp;lt;jake.dothome.co.kr/setup\_per\_cpu\_areas&#xC758; slot &#xC124;&#xBA85; &#xADF8;&#xB9BC;&amp;gt;](.gitbook/assets/setup_per_cpu_areas-16a-768x587.png)
 
+### Dynamic percpu allocation
 
+먼저 간단히 allocation 과정을 그려본다면, 
 
-## Per-cpu Alloc/Free
+1. 요청받은 사이즈를 수용할 수 있는 chunk 찾는다.
+2. 해당 chunk에 새로운 percpu를 할당한다. 즉, chunk 내부 자료구조들을 갱신한다.
+3. 할당한 percpu에 대해 매핑이 되지 않은 가상 주소가 있다면 매핑한다.
+
+위와 같이 3단계를 거칠 것이다. 이러한 점을 숙지하며 코드를 살펴보자.
 
 {% tabs %}
 {% tab title="\_\_alloc\_percpu" %}
