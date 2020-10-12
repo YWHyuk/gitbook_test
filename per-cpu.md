@@ -110,7 +110,7 @@ struct pcpu_chunk {
 }
 ```
 
-앞서 말한대로 chunk 내부의 멤버들은 크게 2가지로 분류된다. 첫번째로는 청크 검색을 위한 멤버, 두번째는 할당받은 메모리 관리를 위한 멤버이다. 이제 이 두 가지 종류의 멤버에 대해 자세히 알아보자.
+앞서 말한대로 chunk 내부의 멤버들은 크게 2가지로 분류된다. 첫 번째로는 청크 검색을 위한 멤버, 두 번째는 할당받은 메모리 관리를 위한 멤버이다. 이제 이 두 가지 종류의 멤버에 대해 자세히 알아보자.
 
 ### Chunk's internal memory management
 
@@ -124,19 +124,24 @@ struct pcpu_chunk {
 최신 버전에서 chunk 내 메모리 관리 방식는 이와 다르며 원한다면 생략해도 된다.  
 {% endhint %}
 
-map은 unit 내의 할당 정보를 저장하고 있는 벡터이며, 할당된/할당되지 않은 연속된 범위에 대해 하나의 엔트리를 가진다. 할당된 영역은 음수로, 할당되지 않은 영역은 양수로 저장된다.
+map은 unit 내의 할당 정보를 저장하고 있는 벡터이다. 할당된/할당되지 않은 연속된 범위에 대해 하나의 엔트리를 가진다. 할당된 영역은 음수로, 할당되지 않은 영역은 양수로 저장된다.
 
-![](.gitbook/assets/unit_map.png)
+![](.gitbook/assets/unit_map%20%281%29.png)
 
 해당 자료 구조의 특성으로 새로운 엔트리가 삽입될 때, 다시 map를 갱신해야 한다. 할당 가능한 연속된 영역을  전부 사용한다면 단순히 음수로 변경하면 되지만, 일부만 사용한다면 영역은 쪼개지개 되며 새로운 엔트리를 생성해야 한다. 
 
-![](.gitbook/assets/head.png)
+![](.gitbook/assets/head%20%281%29.png)
 
 이 역할을 수행하는 함수가 **pcpu\_split\_block**이다. 새롭게 생겨나는 앞 쪽 영역을 head, 뒤 쪽 영역을 tail이라 하며 인자로 해당 영역들의 크기를 넘겨준다.
 
 ```c
+/*
+ * head: 새롭게 생겨나는 head의 크기 없다면 0
+ * tail: 새롭게 생겨나는 tail의 크기 없다면 0
+ */
 static int pcpu_split_block(struct pcpu_chunk *chunk, int i, int head, int tail)
 {
+    /* nr_extra: 새롭게 생겨나는 영역의 수.*/
     int nr_extra = !!head + !!tail;
     int target = chunk->map_used + nr_extra;
 
@@ -162,11 +167,12 @@ static int pcpu_split_block(struct pcpu_chunk *chunk, int i, int head, int tail)
         sizeof(chunk->map[0]) * (chunk->map_used - i));
     chunk->map_used += nr_extra;
 
-    /* head와 tail을 빼는 이유는 무엇인가? */
+    /* head가 존재한다면, head만큼 split */
     if (head) {
         chunk->map[i + 1] = chunk->map[i] - head;
         chunk->map[i++] = head;
     }
+    /* tail이 존재한다면, tail만큼 split */
     if (tail) {
         chunk->map[i++] -= tail;
         chunk->map[i] = tail;
@@ -248,7 +254,7 @@ static void pcpu_chunk_relocate(struct pcpu_chunk *chunk, int oslot)
 먼저 간단히 allocation 과정을 그려본다면, 
 
 1. 요청받은 사이즈를 수용할 수 있는 chunk 찾는다.
-2. 해당 chunk에 새로운 percpu를 할당한다. 즉, chunk 내부 자료구조들을 갱신한다.
+2. 해당 chunk에 새로운 percpu 영역 할당한다. 즉, chunk 내부 자료구조들을 갱신한다.
 3. 할당한 percpu에 대해 매핑이 되지 않은 가상 주소가 있다면 매핑한다.
 
 위와 같이 3단계를 거칠 것이다. 이러한 점을 숙지하며 코드를 살펴보자.
@@ -271,9 +277,11 @@ void *__alloc_percpu(size_t size, size_t align)
 
     mutex_lock(&pcpu_mutex);
 
-    /* 후보 슬롯들에 대해 순회 */
+    /* 후보 슬롯들에 대해 순회한다 */
     for (slot = pcpu_size_to_slot(size); slot < pcpu_nr_slots; slot++) {
+        /* 해당 슬롯에 소속된 청크들을 순회한다 */
         list_for_each_entry(chunk, &pcpu_slot[slot], list) {
+            /* 해당 슬롯에 수용 가능한 용량이 있는지 확*/
             if (size > chunk->contig_hint)
                 continue;
             off = pcpu_alloc_area(chunk, size, align);
@@ -284,7 +292,8 @@ void *__alloc_percpu(size_t size, size_t align)
         }
     }
 
-    /* 새로운 청크 할당, 해당 청크에서 pcpu_alloc_area 호출
+    /* 요청을 수용하는 청크가 존재하지 않음. 새로운 청크 할당, 
+     * 해당 청크에서 pcpu_alloc_area 호출
      *               내용 생략... 
      */
     
@@ -326,7 +335,10 @@ static int pcpu_alloc_area(struct pcpu_chunk *chunk, int size, int align)
         if (chunk->free_size)
             chunk->map[chunk->map_used++] = chunk->free_size;
     }
-
+    /*
+     * i : map 검색에 사용하는 인덱스 
+     * offset : 각 영역이 시작하는 오프셋
+     */
     for (i = 0, off = 0; i < chunk->map_used; off += abs(chunk->map[i++])) {
         bool is_last = i + 1 == chunk->map_used;
         int head, tail;
@@ -343,32 +355,34 @@ static int pcpu_alloc_area(struct pcpu_chunk *chunk, int size, int align)
         }
 
         /*
-         * If head is small or the previous block is free,
-         * merge'em.  Note that 'small' is defined as smaller
-         * than sizeof(int), which is very small but isn't too
-         * uncommon for percpu allocations.
+         * Head가 4바이트 미만이거나 앞에 영역이 사용가능한 영역이라면 병합한다.
+         * (하지만 사용 가능한 영역이 두 개 연달아 있을 수 있는건가?)
          */
          if (head && (head < sizeof(int) || chunk->map[i - 1] > 0)) {
+            /* 앞에 영역이 사용가능한 영역이라면 남는 부분을 병합 */
             if (chunk->map[i - 1] > 0)
                 chunk->map[i - 1] += head;
+            /* head가 4바이트 미만인 경우로 사용 중인 영역으로 취급 */
             else {
                 chunk->map[i - 1] -= head;
                 chunk->free_size -= head;
             }
+            /* head가 병합되었으므로 head만큼 줄이고 offset을 조정한다. */
             chunk->map[i] -= head;
             off += head;
             head = 0;
         }
 
-        /* if tail is small, just keep it around */
+        /* Tail이 4바이트 미만이면 버린다. */
         tail = chunk->map[i] - head - size;
         if (tail < sizeof(int))
             tail = 0;
 
-        /* split if warranted */
+        /* head와 Tail이 존재하면 split해야 한다. */
         if (head || tail) {
             if (pcpu_split_block(chunk, i, head, tail))
                 return -ENOMEM;
+            /* 새롭게 생겨난 head/tail 영역에 대해 max_contig 검사 */
             if (head) {
                 i++;
                 off += head;
@@ -378,7 +392,9 @@ static int pcpu_alloc_area(struct pcpu_chunk *chunk, int size, int align)
                 max_contig = max(chunk->map[i + 1], max_contig);
         }
 
-        /* update hint and mark allocated */
+        /* is_last인 경우는 max_contig가 정확한 값이지만
+         * 아닌 경우에는 부정확한 값이다.
+         */
         if (is_last)
             chunk->contig_hint = max_contig; /* fully scanned */
         else
@@ -387,7 +403,8 @@ static int pcpu_alloc_area(struct pcpu_chunk *chunk, int size, int align)
 
         chunk->free_size -= chunk->map[i];
         chunk->map[i] = -chunk->map[i];
-
+        
+        /* 슬롯 변경 */
         pcpu_chunk_relocate(chunk, oslot);
         return off;
     }
@@ -474,4 +491,6 @@ err:
   * **Line 24~3**1: 현재 페이지 인덱스에 각 유닛별로 페이지를 할당한다.
   * **Line 34**: 루프안에서 매핑 못한 페이지를 매핑한다.
   * **Line 37~39**: 할당한 페이지들을 0으로 초기화한다.
+
+
 
