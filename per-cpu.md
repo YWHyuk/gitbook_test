@@ -181,11 +181,11 @@ static int pcpu_split_block(struct pcpu_chunk *chunk, int i, int head, int tail)
 }
 ```
 
-* **Line 3~4**: 새롭게 생성되는 영역의 수를 nr\_extra에 저장하고 target에 늘어난 엔트리의 수를 저장한다.
-* **Line 7~21**: map 벡터의 크기가 작다면 늘린다.
-* **Line 24~26**: i번째 이후 엔트리들은 nr\_extra만큼 시프트한다. chunk의 엔트리 수를 업데이트한다.
-* **Line 29~31**: head가 존재한다면 head를 위한 엔트리를 생성한다.
-* **Line 33~36**: tail이 존재한다면 tail을 위한 엔트리를 생성한다.
+* **Line 8~9**: 새롭게 생성되는 영역의 수를 nr\_extra에 저장하고 target에 늘어난 엔트리의 수를 저장한다.
+* **Line 12~26**: map 벡터의 크기가 작다면 늘린다.
+* **Line 29~31**: i번째 이후 엔트리들은 nr\_extra만큼 시프트한다. chunk의 엔트리 수를 업데이트한다.
+* **Line 34~37**: head가 존재한다면 head를 위한 엔트리를 생성한다.
+* **Line 39~42**: tail이 존재한다면 tail을 위한 엔트리를 생성한다.
 
 ### Chunk searching
 
@@ -249,7 +249,7 @@ static void pcpu_chunk_relocate(struct pcpu_chunk *chunk, int oslot)
 
 ![&amp;lt;jake.dothome.co.kr/setup\_per\_cpu\_areas&#xC758; slot &#xC124;&#xBA85; &#xADF8;&#xB9BC;&amp;gt;](.gitbook/assets/setup_per_cpu_areas-16a-768x587.png)
 
-### Dynamic percpu allocation
+### Dynamic percpu allocation 1
 
 먼저 간단히 allocation 과정을 그려본다면, 
 
@@ -267,14 +267,9 @@ void *__alloc_percpu(size_t size, size_t align)
     void *ptr = NULL;
     struct pcpu_chunk *chunk;
     int slot, off;
-
-    if (unlikely(!size || size > PAGE_SIZE << PCPU_MIN_UNIT_PAGES_SHIFT ||
-             align > PAGE_SIZE)) {
-        WARN(true, "illegal size (%zu) or align (%zu) for "
-             "percpu allocation\n", size, align);
-        return NULL;
-    }
-
+    
+    ...
+    
     mutex_lock(&pcpu_mutex);
 
     /* 후보 슬롯들에 대해 순회한다 */
@@ -320,21 +315,6 @@ static int pcpu_alloc_area(struct pcpu_chunk *chunk, int size, int align)
     int max_contig = 0;
     int i, off;
 
-    /*
-     * The static chunk initially doesn't have map attached
-     * because kmalloc wasn't available during init.  Give it one.
-     */
-    if (unlikely(!chunk->map)) {
-        chunk->map = pcpu_realloc(NULL, 0,
-                PCPU_DFL_MAP_ALLOC * sizeof(chunk->map[0]));
-        if (!chunk->map)
-            return -ENOMEM;
-
-        chunk->map_alloc = PCPU_DFL_MAP_ALLOC;
-        chunk->map[chunk->map_used++] = -pcpu_static_size;
-        if (chunk->free_size)
-            chunk->map[chunk->map_used++] = chunk->free_size;
-    }
     /*
      * i : map 검색에 사용하는 인덱스 
      * offset : 각 영역이 시작하는 오프셋
@@ -412,7 +392,26 @@ static int pcpu_alloc_area(struct pcpu_chunk *chunk, int size, int align)
 }
 ```
 {% endtab %}
+{% endtabs %}
 
+* **Line 12**: size에 해당하는 슬롯부터 가장 큰 free size를 가지는 슬롯까지 순회한다.
+* **Line 14**: 슬롯에 있는 연결 리스트를 순회한다.
+* **Line 16~18:** 해당 chunk에 연속된 메모리가 존재한다면 pcpu\_alloc\_area를 호출한다.
+  * **pcpu\_alloc\_area 진입**
+  * **Line 11**: map을 순회한다. i는 인덱스로, offset은 해당 segment가 시작하는 오프셋이다.
+  * **Line 16:** 실제 할당받는 위치와 세그먼트의 오프셋의 차를 헤더에 저장한다. \(앞 그림 참고\)
+  * **Line 19~24:**  해당 ****세그먼트가 할당 가능하고 충분한 크기를 가지는지 확인
+  * **Line 30~43**: 헤드를 앞의 영역과 병.
+  * **Line 46~48**: 테일을 구하고, 테일이 충분히 작은지 확인한다.
+  * **Line 51~62**: 헤드나 테일이 있다면 split해 한다. 따라서 pcpu\_split\_block을 호출한다. 새롭게 생성된 엔트리에 대해 max\_contig와 비교하고 갱신한다.
+  * **Line 67~71**: max\_contig를 설정/갱신한다.
+  * **Line 73~74**: 할당한 만큼 free\_size를 조절한다. 또한 할당된 영역을 음수로 표시한다.
+  * **Line 77:** free\_size가 변경되었으므로, 들어갈 슬롯도 변경한다.
+* **Line 33**: 찾은 offset에 대해 populate를 진행한다. 성공시 per-cpu 포인터를 리턴한다.
+
+### **Dynamic percpu allocation 2**
+
+{% tabs %}
 {% tab title="pcpu\_populate\_chunk" %}
 ```c
 static int pcpu_populate_chunk(struct pcpu_chunk *chunk, int off, int size)
@@ -424,9 +423,14 @@ static int pcpu_populate_chunk(struct pcpu_chunk *chunk, int off, int size)
     int map_end;
     unsigned int cpu;
     int i;
-
+    
+    /* 
+     * map_start: 새롭게 할당/매핑해야할 페이지 인덱스의 시작
+     * map_end : 새롭게 할당/매핑해야할 페이지의 인덱스의 끝
+     */
     for (i = page_start; i < page_end; i++) {
         if (pcpu_chunk_page_occupied(chunk, i)) {
+            /* 이전에 새롭게 할당 받은 페이지(들)가 있다면 매핑한다. */
             if (map_start >= 0) {
                 if (pcpu_map(chunk, map_start, map_end))
                     goto err;
@@ -437,7 +441,8 @@ static int pcpu_populate_chunk(struct pcpu_chunk *chunk, int off, int size)
 
         map_start = map_start < 0 ? i : map_start;
         map_end = i + 1;
-
+        
+        /* 페이지가 없으므로 새로 할당 받는다. */
         for_each_possible_cpu(cpu) {
             struct page **pagep = pcpu_chunk_pagep(chunk, cpu, i);
 
@@ -465,32 +470,262 @@ err:
 {% endtab %}
 {% endtabs %}
 
-* **Line 7~12**: size에 대한 유효성 검사를 한다.
-* **Line 17**: size에 해당하는 슬롯부터 가장 큰 free size를 가지는 슬롯까지 순회한다.
-* **Line 18**: 슬롯에 있는 연결 리스트를 순회한다.
-* **Line 19~21:** 해당 chunk에 연속된 메모리가 존재한다면 pcpu\_alloc\_area를 호출한다.
-  * pcpu\_alloc\_area 진입
-  * **Line 11~21**: first chunk의 경우 map이 할당되지 않았기에 초기화 해주는 부분이다.
-  * **Line 23**: map을 순회한다. i는 인덱스로, offset은 해당 segment가 시작하는 오프셋이다.
-  * **Line 28:** 실제 할당받는 위치와 세그먼트의 오프셋의 차를 헤더에 저장한다. \(아래 그림 참조\)
-  * **Line 31~35:**  해당 ****세그먼트가 할당 가능하고 충분한 크기를 가지는지 확인
-  * **Line 44~46**: 헤드가 존재하고, 이전의 세그먼트가 할당 가능한 영역이라면 그 둘을 병합한다.
-  * **Line 48~49**:  헤드가 충분히 작고, 이전의 세그먼트가 할당된 영역일때 둘을 병합한다.
-  * **Line 51~53**: 헤드가 병합되었으므로, 현재 세그먼트에서 헤드만큼 크기를 낮추고, 오프셋도 헤드만큼 앞으로 늘린다.
-  * **Line 57~58**: 테일을 구하고, 테일이 충분히 작은지 확인한다.
-  * **Line 62~72**: 헤드나 테일이 있다면 새로운 엔트리가 삽입되야 한다. 따라서 pcpu\_split\_block을 호출한다. 새롭게 생성된 엔트리에 대해 max\_contig와 비교하고 갱신한다.
-  * **Line 75~79**: max\_contig를 설정/갱신한다.
-  * **Line 81~82**: 할당한 만큼 free\_size를 조절한다. 또한 할당된 영역을 음수로 표시한다.
-  * **Line 84: free\_size**가 변경되었으므로, 들어갈 슬롯도 변경한다.
-* **Line 35~43**: 찾은 offset에 대해 populate를 진행한다. 성공시 per-cpu 포인터를 리턴한다.
-  * pcpu\_populate\_chunk 진입
-  * **Line 4~5**: offset과 size를 시작/마지막 페이지 인덱스로 변환한다.
-  * **Line 11**: 시작 페이지 인덱스부터 마지막 페이지 인덱스까지 순회한다.
-  * **Line 12~19**: 현재 페이지 인덱스에 할당된 물리 페이지가 있고, 이전에 새롭게 할당한\(map\_start&gt;=0\)이라면 새롭게 할당받은 물리 페이지들을 가상주소와 매핑한다.
-  * **Line 21~22**: map\_start가 설정이 안되어있다면 현재 인덱스로 설정되어 있다면 그대로 값을 유지한다. map\_end는 i+1로 설정한다.
-  * **Line 24~3**1: 현재 페이지 인덱스에 각 유닛별로 페이지를 할당한다.
-  * **Line 34**: 루프안에서 매핑 못한 페이지를 매핑한다.
-  * **Line 37~39**: 할당한 페이지들을 0으로 초기화한다.
+* **Line 4~5**: offset과 size를 시작/마지막 페이지 인덱스로 변환한다.
+* **Line 15**: 시작 페이지 인덱스부터 마지막 페이지 인덱스까지 순회한다.
+* **Line 16~24**: 현재 페이지 인덱스에 할당된 물리 페이지가 있고, 이전에 새롭게 할당한\(map\_start&gt;=0\) 페이지가 있다면 가상주소와 매핑한다.
+* **Line 26~27**: map\_start와 map\_end를 설정한다. 할당되지 않은 페이지 인덱스의 시작과 끝을 저장한다.
+* **Line 30~37**: 현재 페이지 인덱스에 각 유닛별로 페이지를 할당한다.
+* **Line 40**: 루프안에서 매핑 못한 페이지를 매핑한다.
+* **Line 43~45**: 할당한 페이지들을 0으로 초기화한다.
+
+### population에 대한 보충 설명 필요...
+
+### chunk allocation
+
+이제 새로운 chunk를 생성하는 과정을 살펴 보자.
+
+```c
+static struct pcpu_chunk *alloc_pcpu_chunk(void)
+{
+       struct pcpu_chunk *chunk;
+
+       chunk = kzalloc(pcpu_chunk_struct_size, GFP_KERNEL);
+       if (!chunk)
+               return NULL;
+
+       chunk->map = pcpu_realloc(NULL, 0,
+                                 PCPU_DFL_MAP_ALLOC * sizeof(chunk->map[0]));
+       chunk->map_alloc = PCPU_DFL_MAP_ALLOC;
+       chunk->map[chunk->map_used++] = pcpu_unit_size;
+
+       chunk->vm = get_vm_area(pcpu_chunk_size, GFP_KERNEL);
+       if (!chunk->vm) {
+               free_pcpu_chunk(chunk);
+               return NULL;
+       }
+
+       INIT_LIST_HEAD(&chunk->list);
+       chunk->free_size = pcpu_unit_size;
+       chunk->contig_hint = pcpu_unit_size;
+
+       return chunk;
+}
+```
+
+alloc\_pcpu\_chunk는 정규 할당자를 이용하여, chunk 구조체를 할당하고 초기화 한다.
+
+* **Line 5**에서 필요한 공간을 할당을 받고,
+* **Line 9~22** 모두 멤버 변수를 초기화 하는 정이다.
+
+하지만 static percpu를 생성하는 시점에서는 **정규 할당자를 사용할 수 없다**. 따라서 static한 영역을 생성하는 함수가 별도로 존재한다. 이 함수는 나중에 pcpu\_setup\_first\_chunk으로 명칭이 변경된다.
+
+```c
+size_t __init pcpu_setup_static(pcpu_populate_pte_fn_t populate_pte_fn,
+                               struct page **pages, size_t cpu_size)
+{
+       static struct vm_struct static_vm;
+       struct pcpu_chunk *static_chunk;
+       int nr_cpu_pages = DIV_ROUND_UP(cpu_size, PAGE_SIZE);
+       unsigned int cpu;
+       int err, i;
+
+       pcpu_unit_pages_shift = max_t(int, PCPU_MIN_UNIT_PAGES_SHIFT,
+                                     order_base_2(cpu_size) - PAGE_SHIFT);
+
+       pcpu_static_size = cpu_size;
+       pcpu_unit_pages = 1 << pcpu_unit_pages_shift;
+       pcpu_unit_shift = PAGE_SHIFT + pcpu_unit_pages_shift;
+       pcpu_unit_size = 1 << pcpu_unit_shift;
+       pcpu_chunk_size = num_possible_cpus() * pcpu_unit_size;
+       pcpu_nr_slots = pcpu_size_to_slot(pcpu_unit_size) + 1;
+       pcpu_chunk_struct_size = sizeof(struct pcpu_chunk)
+               + num_possible_cpus() * pcpu_unit_pages * sizeof(struct page *);
+
+       /* allocate chunk slots */
+       pcpu_slot = alloc_bootmem(pcpu_nr_slots * sizeof(pcpu_slot[0]));
+       for (i = 0; i < pcpu_nr_slots; i++)
+               INIT_LIST_HEAD(&pcpu_slot[i]);
+
+       /* init and register vm area */
+       static_vm.flags = VM_ALLOC;
+       static_vm.size = pcpu_chunk_size;
+       vm_area_register_early(&static_vm);
+
+       /* init static_chunk */
+       static_chunk = alloc_bootmem(pcpu_chunk_struct_size);
+       INIT_LIST_HEAD(&static_chunk->list);
+       static_chunk->vm = &static_vm;
+       static_chunk->free_size = pcpu_unit_size - pcpu_static_size;
+       static_chunk->contig_hint = static_chunk->free_size;
+
+       /* assign pages and map them */
+       for_each_possible_cpu(cpu) {
+               for (i = 0; i < nr_cpu_pages; i++) {
+                       *pcpu_chunk_pagep(static_chunk, cpu, i) = *pages++;
+                       populate_pte_fn(pcpu_chunk_addr(static_chunk, cpu, i));
+               }
+       }
+
+       err = pcpu_map(static_chunk, 0, nr_cpu_pages);
+       if (err)
+               panic("failed to setup static percpu area, err=%d\n", err);
+       /* link static_chunk in */
+       pcpu_chunk_relocate(static_chunk, -1);
+       pcpu_chunk_addr_insert(static_chunk);
+
+       /* we're done */
+       pcpu_base_addr = (void *)pcpu_chunk_addr(static_chunk, 0, 0);
+       return pcpu_unit_size;
+}
+```
+
+* **Line 10~17**: 유닛 사이즈에 관련된 전역 변수를 초기화한다.
+* **Line 18~25**: chunk 구조체의 사이를 계산하 슬롯 테이블을 할당/초기화 한다.
+* **Line 28~30**: static chunk가 차지하는 가상 주소를 미리 등록한다.
+* **Line 33~37**: chunk 구조체를 할당하고, 멤버 변수들을 초기화 한다.
+* **Line 42**: 인자로 받은 페이지 디스크립터 테이블을 chunk 내로 복사한다.
+* **Line 43**: 가상 주소를 사용할 수 있게 페이지 테이블을 구성한다.
+* **Line 47**: 구성된 페이지 테이블에 페이지를 등록한다.
+* **Line 51~52**: 생성된 chunk를 슬롯과 rb 트리에 등록한다.
+* **Line 55**: 전역 변수 pcpu\_base\_addr에 static percpu의 가상 주소 시작 주소를을 저장한다.
+
+## Changelog 1
+
+### 레드 블랙 트리 삭제\(Commit e1b9aa3f47242\)
+
+가상 주소를 받고 그 주소의 대응하는 청크를 알려주는 pcpu\_chunk\_addr\_search의 구현이 달라졌다. 기존에는  레드 블랙 트리를 이용하였지만, 이제는 페이지 디스크립터안에 소속된 chunk를 저장한다. 핵심적인 변화 사항은 아래와 같다.
+
+{% tabs %}
+{% tab title="pcpu\_chunk" %}
+```c
+struct pcpu_chunk {
+    ...
+    struct rb_node      rb_node;    /* 삭제 */
+    ...
+}
+```
+{% endtab %}
+
+{% tab title="page to pcpu" %}
+```c
+/* set the pointer to a chunk in a page struct */
+static void pcpu_set_page_chunk(struct page *page, struct pcpu_chunk *pcpu)
+{
+   page->index = (unsigned long)pcpu;
+}
+
+/* obtain pointer to a chunk from a page struct */
+static struct pcpu_chunk *pcpu_get_page_chunk(struct page *page)
+{
+   return (struct pcpu_chunk *)page->index;
+}
+```
+{% endtab %}
+{% endtabs %}
+
+. 사용 가능하지만 reserved라는 속성을 위해 같은 공간을 가르키치만 논리적으로 두 개의 청크로 분리함.
+
+### static chunk 초기화 함수에 더 많은 자유를 부여\(Commit 8d408b4be37b\)
+
+기존의 pcpu\_setup\_static 함수는 static 영역을 할당한다. 남은 영역은 free size에 저장되고 이 영역은 dynamic하게 사용될 수 있다, 하지만 이 영역이 부족하다면 정규 할당자를 통해 새로운 chunk를 할당받아야 한다. 따라서 정규 할당자가 동작하지 않는 상황에서 chunk에 남는 공간이 없다면 문제가 발생한다. 
+
+이를 해결하기 위한 커밋의 주 변경점은 아래 3가지와 같다.
+
+1. PERCPU\_DYNAMIC\_RESERVE으로 아키텍쳐에 따라 필요한 dynamic 영역의 크기를 지정할 수 있다.
+2. pcpu\_setup\_static 함수는 pcpu\_setup\_first\_chunk으로 명칭이 변경되었다.
+3. pcpu\_setup\_first\_chunk에 unit의 크기나 dynamic 영역의 크기, base\_addr을 인자로 줄 수 있다.
+
+{% tabs %}
+{% tab title="PERCPU\_DYNAMIC\_RESERVE" %}
+```c
+/* 아키텍쳐에서 명시적으로 지정하지 않는 경우 */
+
+#ifndef PERCPU_DYNAMIC_RESERVE
+#  if BITS_PER_LONG > 32
+#    ifdef CONFIG_MODULES
+#      define PERCPU_DYNAMIC_RESERVE   (6 << PAGE_SHIFT)
+#    else
+#      define PERCPU_DYNAMIC_RESERVE   (4 << PAGE_SHIFT)
+#    endif
+#  else
+#    ifdef CONFIG_MODULES
+#      define PERCPU_DYNAMIC_RESERVE   (4 << PAGE_SHIFT)
+#    else
+#      define PERCPU_DYNAMIC_RESERVE   (2 << PAGE_SHIFT)
+#    endif
+#  endif
+#endif /* PERCPU_DYNAMIC_RESERVE */
+```
+{% endtab %}
+{% endtabs %}
+
+### Reserved 영역 구현\(Commit edcb463997ed\)
+
+기존의 first chunk에 static, dynmaic 영역 뿐만 아니라 시스템이 나중에 사용할 공간인 reserved 영역을 추가한다. 이 영역은 reserved 영역을 위한 특별한 할당자를 통해 사용한다.
+
+만약 reserved 영역이 존재하면, first chunk는 reserved chunk로 간주되며 특별한 접근 방법이 필요하다. 만약 reserved 영역과 dynamic 영역 둘 모두 가진다면, dynamic 영역을 관리하는 가상\(?\) 청크가 생성된다.
+
+![](.gitbook/assets/unit.png)
+
+ **1번과 3번**은 chunk가 슬롯에 연결되어 있다. 따라서 일반적인 할당자를 이용하여 해당 청크에서 새로운 영역을 할당받을 수 있다. 
+
+**2번**의 경우 chunk에는 사용가능한 영역이 있지만 특별한 할당자를 이용한다. 
+
+**4번**과 같은 경우는 같은 영역을 바라보는 2개의 청크가 있다. 하나는 reserved 영역을 위한 chunk가 있고 dynamic 영역을 위한 chunk가 따로 존재한다.
+
+아래 코드를 살피며 어떻게 구현되었는지 알아보자. **+**로 표시된 라인은 새롭게 추가된 라인이다.
+
+```c
+size_t __init pcpu_setup_first_chunk(pcpu_get_page_fn_t get_page_fn,
++                                    size_t static_size, size_t reserved_size,
+                                     ssize_t unit_size, ssize_t dyn_size,
+                                     void *base_addr,
+                                     pcpu_populate_pte_fn_t populate_pte_fn)
+{
++       static int smap[2], dmap[2];
++       struct pcpu_chunk *schunk, *dchunk = NULL;
+        ...
+        
+        if (reserved_size) {
++               schunk->free_size = reserved_size;
++               pcpu_reserved_chunk = schunk;   /* not for dynamic alloc */
++       } else {
++               schunk->free_size = dyn_size;
++               dyn_size = 0;                   /* dynamic area covered */
++       }
+        schunk->contig_hint = schunk->free_size;
+
+        schunk->map[schunk->map_used++] = -static_size;
+        if (schunk->free_size)
+                schunk->map[schunk->map_used++] = schunk->free_size;
+
++       pcpu_reserved_chunk_limit = static_size + schunk->free_size;
++
++       /* init dynamic chunk if necessary */
++       if (dyn_size) {
++               dchunk = alloc_bootmem(sizeof(struct pcpu_chunk));
++               INIT_LIST_HEAD(&dchunk->list);
++               dchunk->vm = &first_vm;
++               dchunk->map = dmap;
++               dchunk->map_alloc = ARRAY_SIZE(dmap);
++               dchunk->page = schunk->page_ar; /* share page map with schunk */
++
++               dchunk->contig_hint = dchunk->free_size = dyn_size;
++               dchunk->map[dchunk->map_used++] = -pcpu_reserved_chunk_limit;
++               dchunk->map[dchunk->map_used++] = dchunk->free_size;
++       }
++
+        /* Dynamic 할당을 위한 chunk를 슬롯에 등록한다 */
++       if (!dchunk) {
++               pcpu_chunk_relocate(schunk, -1);
++               pcpu_chunk_addr_insert(schunk);
++       } else {
++               pcpu_chunk_relocate(dchunk, -1);
++               pcpu_chunk_addr_insert(dchunk);
++       }
+```
 
 
+
+ 
 
