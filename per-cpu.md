@@ -725,7 +725,14 @@ size_t __init pcpu_setup_first_chunk(pcpu_get_page_fn_t get_page_fn,
 +       }
 ```
 
-
-
- 
+* **Line 7~8**:두 개의  청크를 위한 정적 배열과 chunk 포인터이다.
+* **Line 11~13**: reserved 영역이 있다면, schunk는 reserved chunk로 간주되며 남은 공간을 기록한다.
+* **Line 14~16:** reserved 영역이 없으므로 schunk의 남는 공간은 dynamic 영역이 사용한다. 해당 chunk에 dynamic 영역이 할당 되었으므로 필요한 dynamic 사이즈는 0으로 세팅한다.
+* **Line 20:** schunk의 첫 번째 영역은 static 영역이 차지하므로 map에 기록한다.
+* **Line 21~22:** schunk에 남는 공간이 있다면 map에 기록한다.
+* **Line 24:** 의미는 static + reserved 영역의 끝\(dynamic의 시작 위치\)이다.
+* **Line 27:** 해당 라인 부터는 reserved 영역과 dynamic 영역이 모두 존재하는 경우만 다루는 코드이다.
+* **Line 28~33:** dynamic 영역을 위한 chunk를 할당/초기화 한다.
+* **Line 35~37**: dynamic 영역의 크기를 map에 저장하고, 이전의 영역\(static + reserved\) 영역은 사용하지 못하는 영역이라고 map에 기록한다.
+* **Line 41~47**: dynamic 영역을 가진 청크를 슬롯에 넣는다. 
 
