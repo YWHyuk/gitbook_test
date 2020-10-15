@@ -736,3 +736,184 @@ size_t __init pcpu_setup_first_chunk(pcpu_get_page_fn_t get_page_fn,
 * **Line 35~37**: dynamic 영역의 크기를 map에 저장하고, 이전의 영역\(static + reserved\) 영역은 사용하지 못하는 영역이라고 map에 기록한다.
 * **Line 41~47**: dynamic 영역을 가진 청크를 슬롯에 넣는다. 
 
+### Embeded first Chunk setup 헬퍼 함수 일반화\(Commit 66c3a7577224\)
+
+x86 아키텍처에서는 first chunk를 생성하는 ebedding first chunk setup helper를 가졌다. 이제 해당 함수르 다른 아키텍처에서 사용하는 default first chunk allocator으로 도입했다.
+
+pcpu\_setup\_first\_chunk에서 한 것은 first chunk 구조체를 생성했고, 해당 chunk가 관리하는 실제 영역은 할당 하지 않았다. 따라서 first chunk가 관리하는 실제 영역을 할당하고, Prehistoric implementation의 setup\_per\_cpu\_area에서 한 것처럼 chunk에 percpu 섹션을 복사한다. 
+
+아래는 추가된 함수이다
+
+```c
+ssize_t __init pcpu_embed_first_chunk(size_t static_size, size_t reserved_size,
+                      ssize_t dyn_size, ssize_t unit_size)
+{
+    unsigned int cpu;
+
+    /* determine parameters and allocate */
+    pcpue_size = PFN_ALIGN(static_size + reserved_size +
+                   (dyn_size >= 0 ? dyn_size : 0));
+    if (dyn_size != 0)
+        dyn_size = pcpue_size - static_size - reserved_size;
+
+    if (unit_size >= 0) {
+        BUG_ON(unit_size < pcpue_size);
+        pcpue_unit_size = unit_size;
+    } else
+        pcpue_unit_size = max_t(size_t, pcpue_size, PCPU_MIN_UNIT_SIZE);
+
+    pcpue_ptr = __alloc_bootmem_nopanic(
+                    num_possible_cpus() * pcpue_unit_size,
+                    PAGE_SIZE, __pa(MAX_DMA_ADDRESS));
+    if (!pcpue_ptr)
+        return -ENOMEM;
+
+    /* return the leftover and copy */
+    for_each_possible_cpu(cpu) {
+        void *ptr = pcpue_ptr + cpu * pcpue_unit_size;
+
+        free_bootmem(__pa(ptr + pcpue_size),
+                 pcpue_unit_size - pcpue_size);
+        memcpy(ptr, __per_cpu_load, static_size);
+    }
+
+    return pcpu_setup_first_chunk(pcpue_get_page, static_size,
+                      reserved_size, dyn_size,
+                      pcpue_unit_size, pcpue_ptr, NULL);
+}
+```
+
+* **Line 7~16:** unit의 사이즈를 인자에 따라 계산한다.
+* **Line 18:** chunk가 실제로 관리하는 영역을 할당한다.
+* **Line 25~31:** 할당된 영역에 static 영역을 복사한다.
+* **Line 33:** first chunk를 생성한다.
+
+### Drop pcpu\_chunk-&gt;page\[\] \(Commit ce3141a277ff\)
+
+ 기존의 percpu는 페이지 디스크립터 포인터 배열을 이용하여 해당 페이지가 할당되었는지 확인할 수 있었다. 이제는 비트맵을 통해 페이지가 할당되었는지 확인한다. page에 접근하기위해서 vmalloc\_to\_page\(\)를 대신 이용한다.
+
+{% tabs %}
+{% tab title="pcpu\_chunk" %}
+```c
+struct pcpu_chunk {
+        int                     map_alloc;      /* # of map entries allocated */
+        int                     *map;           /* allocation map */
+        bool                    immutable;      /* no [de]population allowed */
+-       struct page             *page[];        /* 삭제 */
++       unsigned long           populated[];    /* populated bitmap */
+ };
+```
+{% endtab %}
+
+{% tab title="pcpu\_chunk\_page" %}
+```c
+static struct page *pcpu_chunk_page(struct pcpu_chunk *chunk,
+                                   unsigned int cpu, int page_idx)
+{
+       /* must not be used on pre-mapped chunk */
+       WARN_ON(chunk->immutable);
+       
+       /* vmalloc_to_page를 사용 */
+       return vmalloc_to_page((void *)pcpu_chunk_addr(chunk, cpu, page_idx));
+ }
+```
+{% endtab %}
+{% endtabs %}
+
+ 아래는 비트맵의 iterarting에 사용되는 함수들이다.
+
+```c
+static void pcpu_next_unpop(struct pcpu_chunk *chunk, int *rs, int *re, int end)
+{
+       /* bitmap에 0인 구간의 시작과 위치를 넘겨준다.
+        *
+        * 11110000000011111111000
+        *     ↑      ↑
+        *   *rs     *re
+        */
+       *rs = find_next_zero_bit(chunk->populated, end, *rs);
+       *re = find_next_bit(chunk->populated, end, *rs + 1);
+}
+
+static void pcpu_next_pop(struct pcpu_chunk *chunk, int *rs, int *re, int end)
+{
+       /* bitmap에 1인 구간의 시작과 위치를 넘겨준다.
+        *
+        * 11110000000011111111000
+        *             ↑      ↑
+        *            *rs     *re
+        */
+       *rs = find_next_bit(chunk->populated, end, *rs);
+       *re = find_next_zero_bit(chunk->populated, end, *rs + 1);
+}
+
+#define pcpu_for_each_unpop_region(chunk, rs, re, start, end)              \
+       for ((rs) = (start), pcpu_next_unpop((chunk), &(rs), &(re), (end)); \
+            (rs) < (re);                                                   \
+            (rs) = (re) + 1, pcpu_next_unpop((chunk), &(rs), &(re), (end)))
+
+#define pcpu_for_each_pop_region(chunk, rs, re, start, end)                \
+       for ((rs) = (start), pcpu_next_pop((chunk), &(rs), &(re), (end));   \
+            (rs) < (re);                                                   \
+            (rs) = (re) + 1, pcpu_next_pop((chunk), &(rs), &(re), (end)))
+```
+
+* **Line 9**: find\_next\_zero\_bit\(addr, end, start\) 함수는 **\[start,end-1\] 구간**에 대해 0인 비트의 위치를 리턴한다. 이와 같은 형식은 다른 find\_next\_\* 함수들 모두 다 공통된다. 따라서 \[\*rs,end-1\]에서 0인 비트의 위치를 \*rs에 저장한다.
+* **Line 10**: \[\*rs+1,end-1\]에서 1인 비트의 위치를 \*re에 저장한다.
+* **Line 13~23:** 위 함수의 반대의 일을 수행한다.
+* **Line 25~28**: 비트맵에 0인 구간들을 순회한다. 각 구간의 시작과 끝은 rs와 re에 담긴다.
+* **Line 30~33**: 위 함수의 반대의 일을 수행한다.
+
+population 정보를 담당하는 데이터 구성이 변경되었으므로 populate하는 함수 또한 변경됐다.
+
+```c
+ static int pcpu_populate_chunk(struct pcpu_chunk *chunk, int off, int size)
+ {
+        int page_start = PFN_DOWN(off);
+        int page_end = PFN_UP(off + size);
++       int free_end = page_start, unmap_end = page_start;
++       struct page **pages;
++       unsigned long *populated;
+        unsigned int cpu;q
++       int rs, re, rc;
+
++       /* quick path, poulate하려는 페이지가 모두 populate되었는지 확인 */
++       pcpu_for_each_pop_region(chunk, rs, re, page_start, page_end) {
++               if (rs == page_start && re == page_end)
++                       goto clear;
++               break;
++       }
+
++       pages = pcpu_get_pages_and_bitmap(chunk, &populated, true);
++       if (!pages)
++               return -ENOMEM;
+
++       /* [page_start, page_end-1]에서 이가 빠진 부분(unpop)에 페이지를 할당한다. */
++       pcpu_for_each_unpop_region(chunk, rs, re, page_start, page_end) {
++               rc = pcpu_alloc_pages(chunk, pages, populated, rs, re);
++               if (rc)
++                       goto err_free;
++               free_end = re;
+        }
+        /* [page_start, page_end-1]에서 이가 빠진 부분(unpop)을 populate한다. */
++       pcpu_for_each_unpop_region(chunk, rs, re, page_start, page_end) {
++               rc = pcpu_map_pages(chunk, pages, populated, rs, re);
++               if (rc)
++                       goto err_unmap;
++               unmap_end = re;
++       }
++       pcpu_post_map_flush(chunk, page_start, page_end);
+
++       /* commit new bitmap */
++       bitmap_copy(chunk->populated, populated, pcpu_unit_pages);
++clear:
+        for_each_possible_cpu(cpu)
+                memset(chunk->vm->addr + cpu * pcpu_unit_size + off, 0,
+                       size);
+        
+        /* 이하 생략 */
+}
+```
+
+필요할때 page\[\]테이블을 생성. 추가된 페이지들은 테이블에 등록. 이를 이용해 populate함 bitmap도 복사본을 받아 사용하고 난 뒤 chunk에 등록한다.
+
