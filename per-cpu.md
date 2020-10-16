@@ -589,7 +589,7 @@ size_t __init pcpu_setup_static(pcpu_populate_pte_fn_t populate_pte_fn,
 * **Line 51~52**: 생성된 chunk를 슬롯과 rb 트리에 등록한다.
 * **Line 55**: 전역 변수 pcpu\_base\_addr에 static percpu의 가상 주소 시작 주소를을 저장한다.
 
-## Changelog 1
+## Changelog
 
 ### 레드 블랙 트리 삭제\(Commit e1b9aa3f47242\)
 
@@ -866,6 +866,8 @@ static void pcpu_next_pop(struct pcpu_chunk *chunk, int *rs, int *re, int end)
 
 population 정보를 담당하는 데이터 구성이 변경되었으므로 populate하는 함수 또한 변경됐다.
 
+{% tabs %}
+{% tab title="pcpu\_populate\_chunk 1" %}
 ```c
  static int pcpu_populate_chunk(struct pcpu_chunk *chunk, int off, int size)
  {
@@ -883,11 +885,58 @@ population 정보를 담당하는 데이터 구성이 변경되었으므로 popu
 +                       goto clear;
 +               break;
 +       }
-
+        /* pages와 populated를 할당 받는다. */
 +       pages = pcpu_get_pages_and_bitmap(chunk, &populated, true);
 +       if (!pages)
 +               return -ENOMEM;
+...
+```
+{% endtab %}
 
+{% tab title="pcpu\_get\_pages\_and\_bitmap" %}
+```c
+static struct page **pcpu_get_pages_and_bitmap(struct pcpu_chunk *chunk,
++                                              unsigned long **bitmapp,
++                                              bool may_alloc)
++{
++       static struct page **pages;
++       static unsigned long *bitmap;
++       size_t pages_size = num_possible_cpus() * pcpu_unit_pages *
++                           sizeof(pages[0]);
++       size_t bitmap_size = BITS_TO_LONGS(pcpu_unit_pages) *
++                            sizeof(unsigned long);
++
++       /* 인자가 NULL이라는 말은 할당해야 하는 곳이란 말이다 */
++       if (!pages || !bitmap) {
++               if (may_alloc && !pages)
++                       pages = pcpu_mem_alloc(pages_size);
++               if (may_alloc && !bitmap)
++                       bitmap = pcpu_mem_alloc(bitmap_size);
++               if (!pages || !bitmap)
++                       return NULL;
++       }
++
++       /* 페이지 디스크립터 배열을 초기화 */
++       memset(pages, 0, pages_size);
++       /* 청크의 비트맵을 복사한다 */
++       bitmap_copy(bitmap, chunk->populated, pcpu_unit_pages);
++
++       *bitmapp = bitmap;
++       return pages;
++}
++
+```
+{% endtab %}
+{% endtabs %}
+
+pcpu\_populate\_chunk
+
+* **Line 12~16:** populate하려는 곳의 페이지가 모두 할당되어 있다면,  아무것도 안해도 된다.
+* **Line 18:** 새로운 페이지를 생성, 매핑하려고 임시 비트맵과 임시 페이지 디스크립터 배열을 할당한다.
+
+{% tabs %}
+{% tab title="pcpu\_populate\_chunk 2" %}
+```c
 +       /* [page_start, page_end-1]에서 이가 빠진 부분(unpop)에 페이지를 할당한다. */
 +       pcpu_for_each_unpop_region(chunk, rs, re, page_start, page_end) {
 +               rc = pcpu_alloc_pages(chunk, pages, populated, rs, re);
@@ -914,6 +963,81 @@ population 정보를 담당하는 데이터 구성이 변경되었으므로 popu
         /* 이하 생략 */
 }
 ```
+{% endtab %}
 
-필요할때 page\[\]테이블을 생성. 추가된 페이지들은 테이블에 등록. 이를 이용해 populate함 bitmap도 복사본을 받아 사용하고 난 뒤 chunk에 등록한다.
+{% tab title="pcpu\_alloc\_pages" %}
+```c
++static int pcpu_alloc_pages(struct pcpu_chunk *chunk,
++                           struct page **pages, unsigned long *populated,
++                           int page_start, int page_end)
++{
++       const gfp_t gfp = GFP_KERNEL | __GFP_HIGHMEM | __GFP_COLD;
++       unsigned int cpu;
++       int i;
++
++       for_each_possible_cpu(cpu) {
++               for (i = page_start; i < page_end; i++) {
++                       /* 인자로 받은 곳에 할당받은 페이지를 넣어준다. */
++                       struct page **pagep = &pages[pcpu_page_idx(cpu, i)];
++
++                       *pagep = alloc_pages_node(cpu_to_node(cpu), gfp, 0);
++                       if (!*pagep) {
++                               pcpu_free_pages(chunk, pages, populated,
++                                               page_start, page_end);
++                               return -ENOMEM;
++                       }
++               }
++       }
++       return 0;
++}
+```
+{% endtab %}
+
+{% tab title="pcpu\_map\_pages" %}
+```c
++static int pcpu_map_pages(struct pcpu_chunk *chunk,
++                         struct page **pages, unsigned long *populated,
++                         int page_start, int page_end)
+{
++       unsigned int cpu, tcpu;
++       int i, err;
+
+        for_each_possible_cpu(cpu) {
+                err = map_kernel_range_noflush(pcpu_chunk_addr(chunk, cpu, page_start),
+                                               (page_end - page_start) << PAGE_SHIFT,
+                                                PAGE_KERNEL,
++                                               &pages[pcpu_page_idx(cpu, page_start)]);
+                if (err < 0)
++                       goto err;
+        }
+
++       /* mapping successful, link chunk and mark populated */
++       for (i = page_start; i < page_end; i++) {
++               for_each_possible_cpu(cpu)
+                        pages[pcpu_page_idx(cpu, i)]->index = chunk;
++               __set_bit(i, populated);
++       }
++
++       return 0;
+/* 에러 처리 */
+}
+```
+{% endtab %}
+{% endtabs %}
+
+ 
+
+* **Line 2~7:** 비트맵을 순회하면서 populated 되지 않은 페이지들을 할당한다.
+* **Line 9~14:** 새로 할당한 페이지들을 가상 주소와 매핑한다. 또한 비트맵에 새롭게 populated된 페이지들을 기록한다.
+* **Line 15:** 페이지 테이블에 변화 사항이 생겼으므로, TLB를 업데이트 해준다.
+* **Line 18:** 새로운 내용이 업데이트된 비트맵을 chunk에 복사한다.
+* **Line 20~22:** 매핑된 페이지들을 0으로 초기화한다.
+
+### 유닛과 CPU의 관계를 비선형적으로 할 수 있게 한다.\(Commit 2f39e637ea24\)
+
+ 기존에는 CPU K가 Unit K에 대응하는 1대1 대응구조였다면, 이제는 CPU가 다른 Unit에 대응할 수 있도록 테이블을 구성한다.
+
+![](.gitbook/assets/mapping.png)
+
+ 
 
