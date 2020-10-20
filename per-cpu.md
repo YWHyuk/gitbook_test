@@ -4,7 +4,7 @@ description: Per-CPU가 발전한 흐름을 따라가 보자.
 
 # Per CPU 완전 분석 노트
 
-Per-cpu는 "[percpu: implement new dynamic percpu allocator](https://github.com/iamroot16/linux/commit/fbf59bc9d74d1fb30b8e0630743aff2806eafcea#diff-5050eed868076fe2656aea8c2eb7312a)"의 패치로 리뉴얼 되었다. 또한 뒤따르는 후속 패치들로 2800줄에 이르는 코드가 되었다. 다양한 내용이 반영된 최신의 percpu.c 파일을 분석하기보다는 몇 줄 안되는 초창기 버전의 percpu.c를 분석하며, percpu란 어떻게 구현되었는지 알아보자.
+tPer-cpu는 "[percpu: implement new dynamic percpu allocator](https://github.com/iamroot16/linux/commit/fbf59bc9d74d1fb30b8e0630743aff2806eafcea#diff-5050eed868076fe2656aea8c2eb7312a)"의 패치로 리뉴얼 되었다. 또한 뒤따르는 후속 패치들로 2800줄에 이르는 코드가 되었다. 다양한 내용이 반영된 최신의 percpu.c 파일을 분석하기보다는 몇 줄 안되는 초창기 버전의 percpu.c를 분석하며, percpu란 어떻게 구현되었는지 알아보자.
 
 ## Prehistoric implementation
 
@@ -1039,5 +1039,82 @@ pcpu\_populate\_chunk
 
 ![](.gitbook/assets/mapping.png)
 
- 
+  따라서 pcpu\_setup\_first\_chunk 함수는 unit\_map을 통한 초기화과정을 추가하였다. 추가된 코드는 인자로 받은 unit map이 1대1 대응\(동일한 unit을 가리키는 cpu가 없도록\)을 이루는지 확인하고, 첫번째 unit과 마지막 unit을 저장하고, 총 유닛 수\(마지막 unit + 1\)을 저장한다. 
+
+{% tabs %}
+{% tab title="pcpu\_setup\_first\_chunk" %}
+```c
+size_t __init pcpu_setup_first_chunk(size_t static_size, size_t reserved_size,
+                                     ssize_t dyn_size, size_t unit_size,
++                                    void *base_addr, const int *unit_map){
+        /* 중간 생 */
+        BUG_ON(unit_size & ~PAGE_MASK);
+        BUG_ON(unit_size < PCPU_MIN_UNIT_SIZE);
+
++       /* 인자로 만들어진 unit map이 있다면, unit map이 1대1 대응을 이루는지
++        * 확인하고, 아니라면 BUG_ON을 뱉는다. 또한 possible한 첫번째 cpu와
++        * 마지막 cpu를 저장하고, 필요한 유닛의 수를 pcpu_nr_units에 저장한다.
++        *
++        * 인자로 못받았다면, indentity map을 생성하여, 이전의 방식처럼 작동
++        * 하게 한다.
++        */
++       if (unit_map) {
++               int first_unit = INT_MAX, last_unit = INT_MIN;
++
++               for_each_possible_cpu(cpu) {
++                       int unit = unit_map[cpu];
++
++                       BUG_ON(unit < 0);
++                       for_each_possible_cpu(tcpu) {
++                               if (tcpu == cpu)
++                                       break;
++                               /* the mapping should be one-to-one */
++                               BUG_ON(unit_map[tcpu] == unit);
++                       }
++
++                       if (unit < first_unit) {
++                               pcpu_first_unit_cpu = cpu;
++                               first_unit = unit;
++                       }
++                       if (unit > last_unit) {
++                               pcpu_last_unit_cpu = cpu;
++                               last_unit = unit;
++                       }
++               }
++               pcpu_nr_units = last_unit + 1;
++               pcpu_unit_map = unit_map;
++       } else {
++               int *identity_map;
++
++               /* #units == #cpus, identity mapped */
++               identity_map = alloc_bootmem(num_possible_cpus() *
++                                            sizeof(identity_map[0]));
++
++               for_each_possible_cpu(cpu)
++                       identity_map[cpu] = cpu;
++
++               pcpu_first_unit_cpu = 0;
++               pcpu_last_unit_cpu = pcpu_nr_units - 1;
++               pcpu_nr_units = num_possible_cpus();
++               pcpu_unit_map = identity_map;
++       }
++
++       /* determine basic parameters */
+        pcpu_unit_pages = unit_size >> PAGE_SHIFT;
+        /* 생략 */
+}
+```
+{% endtab %}
+
+{% tab title="pcpu\_page\_idx" %}
+```c
+static int pcpu_page_idx(unsigned int cpu, int page_idx)
+ {
++       return pcpu_unit_map[cpu] * pcpu_unit_pages + page_idx;
+ }
+```
+{% endtab %}
+{% endtabs %}
+
+
 
