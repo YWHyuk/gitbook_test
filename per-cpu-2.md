@@ -34,8 +34,6 @@ static struct pcpu_chunk *pcpu_get_page_chunk(struct page *page)
 {% endtab %}
 {% endtabs %}
 
-. 사용 가능하지만 reserved라는 속성을 위해 같은 공간을 가르키치만 논리적으로 두 개의 청크로 분리함.
-
 ### static chunk 초기화 함수에 더 많은 자유를 부여\(Commit 8d408b4be37b\)
 
 기존의 pcpu\_setup\_static 함수는 static 영역을 할당한다. 남은 영역은 free size에 저장되고 이 영역은 dynamic하게 사용될 수 있다, 하지만 이 영역이 부족하다면 정규 할당자를 통해 새로운 chunk를 할당받아야 한다. 따라서 정규 할당자가 동작하지 않는 상황에서 chunk에 남는 공간이 없다면 문제가 발생한다. 
@@ -446,7 +444,7 @@ pcpu\_populate\_chunk
 
 ### 유닛과 CPU의 관계를 비선형적으로 할 수 있게 한다.\(Commit 2f39e637ea24\)
 
- 기존에는 CPU K가 Unit K에 대응하는 1대1 대응구조였다면, 이제는 CPU가 다른 Unit에 대응할 수 있도록 테이블을 구성한다.
+ 기존에는 CPU와 Unit은 선형적인 관계였다면, 이제는 1대1 대응을 이루기만 한다면 비선형적인 관계를 가질 수 있도록 한다. 즉, CPU가 다른 Unit에 대응할 수 있도록 테이블을 구성한다.
 
 ![](.gitbook/assets/mapping.png)
 
@@ -586,5 +584,69 @@ static ssize_t __init setup_pcpu_lpage(size_t static_size, bool chosen)
 * **Line 22**에서 실제 **unit\_map** 구성이 완성된다.
 * **Line 34**에서는 만들어진 **unit\_map**을 가지고 **first chunk**를 셋업한다.
 
-\*\*\*\*
+unit map을 build하는 과정에는 해당 패치의 핵심적인 내용이 담겨있다. 앞에서 말했듯이 같은 노드의 cpu가 같은 페이지를 공유하도록 만든다. 그렇다면 두 가지의 문제를 해결해야한다.
+
+* **어떤 cpu가 어떤 node에 속하는가?**
+* **하/나의 페이지를 \(같은 노드의\) 몇 개의 cpu가 공유할 것인가?**
+
+이를 해결하기 위해 새로운 개념을 도입한다.
+
+* group 도입. 여기서 group이란 NUMA node라고 봐도 무방하다.
+  * group\_map : cpu가 속하는 group
+  * group\_cnt : group에 속하는 cpu 수
+* upa\(Unit per alloc\) 도입
+  * 한 페이지에 몇 개의 cpu\(unit\)가 들어갈지 정하는 수.
+  * Page size = Unit Size \* upa
+
+ 아래 예시를 살펴보며, group에 대해 알아보자.
+
+![](.gitbook/assets/group.png)
+
+위 그림에는 예시 NUMA 시스템이 있고, CPU 0,1은 로컬 메모리로 NUMA1을 가진다. CPU 2는 NUMA 1을, CPU3은 NUMA 2를 로컬 메모리로 가진다. 이러한 구성 형태를 group으로 나타내면 우상단 표와 같다.
+
+**group\_map**은 각 cpu가 속하는 NUMA 노드 번호를 저장한다. **group\_cnt**는 각 group\(NUMA\)에 속하는 CPU 수를 저장한다.
+
+위 시스템에서 upa에 따라 구성되는 unit\_map을 살펴보자.
+
+![](.gitbook/assets/upa.png)
+
+ **upa가 2일 때** 구성되는 unit map을 살펴보자. 한 페이지에는 2개의 unit이 들어간다. 같은 group에 속하는 CPU 0과 1은 동일한 페이지에 있는  unit 0과 unit1을 매핑한다. CPU 2와 CPU 3은 각기 다른 group에 속하기 때문에 다른 페이지에 속해야 한다. 따라서 CPU 3은 unit 3 대신 unit 4를 매핑한다.
+
+**upa가 4일 때,** 한 페이지에는 4개의 unit이 들어간다. 같은 group에 속하는 CPU 0과 1은 동일한 페이지에 있는  unit 0과 unit1을 매핑한다. CPU 2와 CPU 3는 각기 다른 페이지에 존재하는 unit 4와 unit 8을 매핑한다.
+
+그럼 어떤 upa를 선택해야 할까? 가장 좋은 upa는 낭비되는 가상 주소 영역이 적고, 할당되는 페이지 수가  적은 것으로 선정한다. 구체적인 내용은 코드를 보며 살펴보자.
+
+```c
+int __init pcpu_lpage_build_unit_map(size_t static_size, size_t reserved_size,
+                     ssize_t *dyn_sizep, size_t *unit_sizep,
+                     size_t lpage_size, int *unit_map,
+                     pcpu_fc_cpu_distance_fn_t cpu_distance_fn)
+{
+    static int group_map[NR_CPUS] __initdata;
+    static int group_cnt[NR_CPUS] __initdata;
+    int group_cnt_max = 0;
+    
+    /* 생략 */
+
+    /* group_map, group_cnt를 세팅한다. */
+    for_each_possible_cpu(cpu) {
+        group = 0;
+    next_group:
+        for_each_possible_cpu(tcpu) {
+            if (cpu == tcpu)
+                break;
+            if (group_map[tcpu] == group &&
+                (cpu_distance_fn(cpu, tcpu) > LOCAL_DISTANCE ||
+                 cpu_distance_fn(tcpu, cpu) > LOCAL_DISTANCE)) {
+                group++;
+                goto next_group;
+            }
+        }
+        group_map[cpu] = group;
+        group_cnt[group]++;
+        group_cnt_max = max(group_cnt_max, group_cnt[group]);
+    }
+```
+
+
 
