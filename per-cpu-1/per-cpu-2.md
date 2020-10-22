@@ -74,7 +74,7 @@ static struct pcpu_chunk *pcpu_get_page_chunk(struct page *page)
 
 만약 reserved 영역이 존재하면, first chunk는 reserved chunk로 간주되며 특별한 접근 방법이 필요하다. 만약 reserved 영역과 dynamic 영역 둘 모두 가진다면, dynamic 영역을 관리하는 가상\(?\) 청크가 생성된다.
 
-![](.gitbook/assets/unit.png)
+![](../.gitbook/assets/unit.png)
 
  **1번과 3번**은 chunk가 슬롯에 연결되어 있다. 따라서 일반적인 할당자를 이용하여 해당 청크에서 새로운 영역을 할당받을 수 있다. 
 
@@ -446,7 +446,7 @@ pcpu\_populate\_chunk
 
  기존에는 CPU와 Unit은 선형적인 관계였다면, 이제는 1대1 대응을 이루기만 한다면 비선형적인 관계를 가질 수 있도록 한다. 즉, CPU가 다른 Unit에 대응할 수 있도록 테이블을 구성한다.
 
-![](.gitbook/assets/mapping.png)
+![](../.gitbook/assets/mapping.png)
 
   따라서 pcpu\_setup\_first\_chunk 함수는 unit\_map을 통한 초기화과정을 추가하였다. 추가된 코드는 인자로 받은 unit map이 1대1 대응\(동일한 unit을 가리키는 cpu가 없도록\)을 이루는지 확인하고, 첫번째 unit과 마지막 unit을 저장하고, 총 유닛 수\(마지막 unit + 1\)을 저장한다. 
 
@@ -600,7 +600,7 @@ unit map을 build하는 과정에는 해당 패치의 핵심적인 내용이 담
 
  아래 예시를 살펴보며, group에 대해 알아보자.
 
-![](.gitbook/assets/group.png)
+![](../.gitbook/assets/group.png)
 
 위 그림에는 예시 NUMA 시스템이 있고, CPU 0,1은 로컬 메모리로 NUMA1을 가진다. CPU 2는 NUMA 1을, CPU3은 NUMA 2를 로컬 메모리로 가진다. 이러한 구성 형태를 group으로 나타내면 우상단 표와 같다.
 
@@ -608,7 +608,7 @@ unit map을 build하는 과정에는 해당 패치의 핵심적인 내용이 담
 
 위 시스템에서 upa에 따라 구성되는 unit\_map을 살펴보자.
 
-![](.gitbook/assets/upa.png)
+![](../.gitbook/assets/upa.png)
 
  **upa가 2일 때** 구성되는 unit map을 살펴보자. 한 페이지에는 2개의 unit이 들어간다. 같은 group에 속하는 CPU 0과 1은 동일한 페이지에 있는  unit 0과 unit1을 매핑한다. CPU 2와 CPU 3은 각기 다른 group에 속하기 때문에 다른 페이지에 속해야 한다. 따라서 CPU 3은 unit 3 대신 unit 4를 매핑한다.
 

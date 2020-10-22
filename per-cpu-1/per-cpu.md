@@ -57,7 +57,7 @@ static void __init setup_per_cpu_areas(void)
 
   해당 함수는 static percpu를 초기화하기 위해 필요한 용량을 구한 후 할당한다. 각각의 cpu에 대응하는 영역에 .data.percpu의 값들을 복사하고 위치를 기록한다.  
 
-![](.gitbook/assets/static.png)
+![](../.gitbook/assets/static.png)
 
 ### Dynamic percpu variable
 
@@ -71,7 +71,7 @@ struct percpu_data {
 
  옛 **Dynamic percpu 변수**의 경우, 위와 같이 선언되었으며 그 구성은 간단하다. 이를 그림으로 표현하면 아래와 같다.
 
-![](.gitbook/assets/pre-percpu.png)
+![](../.gitbook/assets/pre-percpu.png)
 
  해당 구조로 인해, 
 
@@ -86,7 +86,7 @@ struct percpu_data {
 
  새로운 dynamic percpu는 이전의 static percpu의 구조를 그대로 사용하여 통일된 percpu를 이룬다. static percpu를 초기화한 setup\_percpu\_area함수처럼, 연속된 커다란 메모리를 할당받고, cpu마다 공평하게 나눠가지도록 한다. 여기서 연속된 하나의 커다란 메모리를 **chunk**라 하고, cpu마다 분배받은 영역을 **unit**이라 한다.
 
-![&#xC55E;&#xC11C; &#xBCF8; static percpu&#xC5D0; &#xD574;&#xB2F9;&#xD558;&#xB294; &#xBA85;&#xCE6D;](.gitbook/assets/uc.png)
+![&#xC55E;&#xC11C; &#xBCF8; static percpu&#xC5D0; &#xD574;&#xB2F9;&#xD558;&#xB294; &#xBA85;&#xCE6D;](../.gitbook/assets/uc.png)
 
  static percpu의 경우 chunk를 할당하고 각각의 unit에 복사하면 끝이지만, dynamic은 **unit 내의 가용 공간을 관리**해야 한다. 또한 chunk 내의 가용 공간이 부족하면 새로운 chunk를 만들어야 한다. 따라서 chunk는 여러 개일 수 있고, 특정 chunk를 **검색할 수 있도록 chunk 간 관계**를 구성해야한다. 
 
@@ -116,7 +116,7 @@ struct pcpu_chunk {
 
  위에서 chunk는 할당받은 커다란 연속된 메모리라 하였다. 실제적으로는 연속된 가상 메모리를 할당받고 물리 페이지와의 매핑은 필요할 때까지 미루어진다. 즉, 멤버 변수 **vm**은 **get\_vm\_area**를 통해 청크에 할당된 가상 주소 영역이다. 
 
-![](.gitbook/assets/chunkunit.png)
+![](../.gitbook/assets/chunkunit.png)
 
  chunk는 유닛 내의 할당된 공간/사용 가능한 공간을 관리해야 한다고 말했다. 이를 위해 **map**이 사용된다.
 
@@ -126,11 +126,11 @@ struct pcpu_chunk {
 
 map은 unit 내의 할당 정보를 저장하고 있는 벡터이다. 할당된/할당되지 않은 연속된 범위에 대해 하나의 엔트리를 가진다. 할당된 영역은 음수로, 할당되지 않은 영역은 양수로 저장된다.
 
-![](.gitbook/assets/unit_map%20%281%29.png)
+![](../.gitbook/assets/unit_map%20%281%29.png)
 
 해당 자료 구조의 특성으로 새로운 엔트리가 삽입될 때, 다시 map를 갱신해야 한다. 할당 가능한 연속된 영역을  전부 사용한다면 단순히 음수로 변경하면 되지만, 일부만 사용한다면 영역은 쪼개지개 되며 새로운 엔트리를 생성해야 한다. 
 
-![](.gitbook/assets/head%20%281%29.png)
+![](../.gitbook/assets/head%20%281%29.png)
 
 이 역할을 수행하는 함수가 **pcpu\_split\_block**이다. 새롭게 생겨나는 앞 쪽 영역을 head, 뒤 쪽 영역을 tail이라 하며 인자로 해당 영역들의 크기를 넘겨준다.
 
@@ -247,7 +247,7 @@ static void pcpu_chunk_relocate(struct pcpu_chunk *chunk, int oslot)
 {% endtab %}
 {% endtabs %}
 
-![&amp;lt;jake.dothome.co.kr/setup\_per\_cpu\_areas&#xC758; slot &#xC124;&#xBA85; &#xADF8;&#xB9BC;&amp;gt;](.gitbook/assets/setup_per_cpu_areas-16a-768x587.png)
+![&amp;lt;jake.dothome.co.kr/setup\_per\_cpu\_areas&#xC758; slot &#xC124;&#xBA85; &#xADF8;&#xB9BC;&amp;gt;](../.gitbook/assets/setup_per_cpu_areas-16a-768x587.png)
 
 ### Dynamic percpu allocation 1
 
