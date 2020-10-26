@@ -614,7 +614,9 @@ unit map을 build하는 과정에는 해당 패치의 핵심적인 내용이 담
 
 **upa가 4일 때,** 한 페이지에는 4개의 unit이 들어간다. 같은 group에 속하는 CPU 0과 1은 동일한 페이지에 있는  unit 0과 unit1을 매핑한다. CPU 2와 CPU 3는 각기 다른 페이지에 존재하는 unit 4와 unit 8을 매핑한다.
 
-그럼 어떤 upa를 선택해야 할까? 가장 좋은 upa는 낭비되는 가상 주소 영역이 적고, 할당되는 페이지 수가  적은 것으로 선정한다. 구체적인 내용은 코드를 보며 살펴보자.
+그럼 어떤 upa를 선택해야 할까? 가장 좋은 upa는 낭비되는 가상 주소 영역이 적고, 할당되는 페이지 수가  적은 것으로 선정한다. 
+
+이제 구체적인 내용은 코드를 보며 살펴보자.
 
 ```c
 int __init pcpu_lpage_build_unit_map(size_t static_size, size_t reserved_size,
@@ -648,5 +650,86 @@ int __init pcpu_lpage_build_unit_map(size_t static_size, size_t reserved_size,
     }
 ```
 
+위에 코드는 group\_cnt\[\]와 group\_map\[\]을 세팅하는 과정이다. next\_group으로 goto하는 방식 때문에 바로 이해하기 어렵긴 하지만 결과적으로 group\_cnt\[\]와 group\_map\[\]이 cpu간 distance에 따라 분류된다.
 
+```c
+        ...
+        size_t size_sum, min_unit_size, alloc_size;
+        int upa, max_upa, uninitialized_var(best_upa);  /* units_per_alloc */
+        int last_allocs;
+        unsigned int cpu, tcpu;
+        int group, unit;
+
+        /*
+         * Determine min_unit_size, alloc_size and max_upa such that
+         * alloc_size is multiple of lpage_size and is the smallest
+         * which can accomodate 4k aligned segments which are equal to
+         * or larger than min_unit_size.
+         */
+        size_sum = pcpu_calc_fc_sizes(static_size, reserved_size, dyn_sizep);
+        min_unit_size = max_t(size_t, size_sum, PCPU_MIN_UNIT_SIZE);
+
+        alloc_size = roundup(min_unit_size, lpage_size);
+        upa = alloc_size / min_unit_size;
+        while (alloc_size % upa || ((alloc_size / upa) & ~PAGE_MASK))
+                upa--;
+        max_upa = upa;
+        
+        /* group 세팅 */
+                
+        last_allocs = INT_MAX;
+        for (upa = max_upa; upa; upa--) {
+                int allocs = 0, wasted = 0;
+
+                if (alloc_size % upa || ((alloc_size / upa) & ~PAGE_MASK))
+                        continue;
+
+                for (group = 0; group_cnt[group]; group++) {
+                        int this_allocs = DIV_ROUND_UP(group_cnt[group], upa);
+                        allocs += this_allocs;
+                        wasted += this_allocs * upa - group_cnt[group];
+                }
+
+                /*
+                 * Don't accept if wastage is over 25%.  The
+                 * greater-than comparison ensures upa==1 always
+                 * passes the following check.
+                 */
+                if (wasted > num_possible_cpus() / 3)
+                        continue;
+
+                /* and then don't consume more memory */
+                if (allocs > last_allocs)
+                        break;
+                last_allocs = allocs;
+                best_upa = upa;
+        }
+        *unit_sizep = alloc_size / best_upa;
+```
+
+upa를 산출하는 과정이다.  alloc size는 unit의 사이즈의 배수가 되어야한다. 즉,
+
+ alloc\_size = upa \* unit\_size와 같다. 
+
+alloc\_size의 약수 중 모든 upa에 대해 최고의 upa 찾아야 하는데, 이것은 일종의 소인수 분해 동일하다. 소인수 분해를 하는 대신 brute forcing하며 약수가 되는 upa를 찾아 낸다. 낭비되는 메모리가 적은 upa를 선택한다.
+
+```c
+        ...
+        
+        /* assign units to cpus accordingly */
+        unit = 0;
+        for (group = 0; group_cnt[group]; group++) {
+                for_each_possible_cpu(cpu)
+                        if (group_map[cpu] == group)
+                                unit_map[cpu] = unit++;
+                unit = roundup(unit, best_upa);
+        }
+        
+        return unit;
+}
+```
+
+이제 앞에서 계산한 group\_cnt, group\_map, upa를 활용하여 unit\_map을 생성한다.
+
+  
 
