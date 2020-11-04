@@ -731,5 +731,32 @@ alloc\_size의 약수 중 모든 upa에 대해 최고의 upa 찾아야 하는데
 
 이제 앞에서 계산한 group\_cnt, group\_map, upa를 활용하여 unit\_map을 생성한다.
 
-  
+### AI 구조체 도입\(Commit fd1e8a1fe2b5\)
+
+해당 패치는 unit\_map을 생성할 때 계산하는 group에 대한 정보를 저장하게 한다. 도입된 자료구조는 아래와 같다.
+
+```c
+struct pcpu_group_info {
+       int                     nr_units;       /* aligned # of units */
+       unsigned long           base_offset;    /* base address offset */
+       unsigned int            *cpu_map;       /* unit->cpu map, empty
+                                                * entries contain NR_CPUS */
+};
+
+struct pcpu_alloc_info {
+       size_t                  static_size;
+       size_t                  reserved_size;
+       size_t                  dyn_size;
+       size_t                  unit_size;
+       size_t                  atom_size;
+       size_t                  alloc_size;
+       size_t                  __ai_size;      /* internal, don't use */
+       int                     nr_groups;      /* 0 if grouping unnecessary */
+       struct pcpu_group_info  groups[];
+};
+```
+
+### Area map을 bitmap으로 대체 \(Commit 40064aeca35c\)
+
+### Meta block bitmap 도입 \(Commit ca460b3c9627\)
 
