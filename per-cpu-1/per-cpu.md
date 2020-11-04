@@ -4,7 +4,7 @@ description: Per-CPU가 발전한 흐름을 따라가 보자.
 
 # Per CPU 완전 분석 노트
 
-tPer-cpu는 "[percpu: implement new dynamic percpu allocator](https://github.com/iamroot16/linux/commit/fbf59bc9d74d1fb30b8e0630743aff2806eafcea#diff-5050eed868076fe2656aea8c2eb7312a)"의 패치로 리뉴얼 되었다. 또한 뒤따르는 후속 패치들로 2800줄에 이르는 코드가 되었다. 다양한 내용이 반영된 최신의 percpu.c 파일을 분석하기보다는 몇 줄 안되는 초창기 버전의 percpu.c를 분석하며, percpu란 어떻게 구현되었는지 알아보자.
+Per-cpu는 "[percpu: implement new dynamic percpu allocator](https://github.com/iamroot16/linux/commit/fbf59bc9d74d1fb30b8e0630743aff2806eafcea#diff-5050eed868076fe2656aea8c2eb7312a)"의 패치로 리뉴얼 되었다. 또한 뒤따르는 후속 패치들로 2800줄에 이르는 코드가 되었다. 다양한 내용이 반영된 최신의 percpu.c 파일을 분석하기보다는 몇 줄 안되는 초창기 버전의 percpu.c를 분석하며, percpu란 어떻게 구현되었는지 알아보자.
 
 ## Prehistoric implementation
 
@@ -84,11 +84,13 @@ struct percpu_data {
 
 ## Reimplementation
 
- 새로운 dynamic percpu는 이전의 static percpu의 구조를 그대로 사용하여 통일된 percpu를 이룬다. static percpu를 초기화한 setup\_percpu\_area함수처럼, 연속된 커다란 메모리를 할당받고, cpu마다 공평하게 나눠가지도록 한다. 여기서 연속된 하나의 커다란 메모리를 **chunk**라 하고, cpu마다 분배받은 영역을 **unit**이라 한다.
+ 새로운 dynamic percpu는 이전의 static percpu의 구조를 사용하여 통일된 percpu를 이룬다. static percpu를 초기화한 setup\_percpu\_area함수처럼, 연속된 커다란 메모리를 할당받고, cpu마다 공평하게 나눠가지도록 한다. 여기서 연속된 하나의 커다란 메모리를 **chunk**라 하고, cpu마다 분배받은 영역을 **unit**이라 한다.
 
 ![&#xC55E;&#xC11C; &#xBCF8; static percpu&#xC5D0; &#xD574;&#xB2F9;&#xD558;&#xB294; &#xBA85;&#xCE6D;](../.gitbook/assets/uc.png)
 
- static percpu의 경우 chunk를 할당하고 각각의 unit에 복사하면 끝이지만, dynamic은 **unit 내의 가용 공간을 관리**해야 한다. 또한 chunk 내의 가용 공간이 부족하면 새로운 chunk를 만들어야 한다. 따라서 chunk는 여러 개일 수 있고, 특정 chunk를 **검색할 수 있도록 chunk 간 관계**를 구성해야한다. 
+ static percpu의 경우 chunk를 할당하고 각각의 unit에 복사하면 끝이지만, dynamic은 **unit 내의 가용 공간을 관리**해야 한다. 
+
+또한 chunk 내의 가용 공간이 부족하면 새로운 chunk를 만들어야 한다. 따라서 chunk는 여러 개일 수 있고, 특정 chunk를 **검색할 수 있도록 chunk 간 관계**를 구성해야한다. 
 
 위 내용에 초점을 맞추면서 Chunk 구조체를 들여다 보자.
 
@@ -251,13 +253,13 @@ static void pcpu_chunk_relocate(struct pcpu_chunk *chunk, int oslot)
 
 ### Dynamic percpu allocation 1
 
-먼저 간단히 allocation 과정을 그려본다면, 
+먼저 간단히 allocation 과정을 요약하면, 
 
 1. 요청받은 사이즈를 수용할 수 있는 chunk 찾는다.
 2. 해당 chunk에 새로운 percpu 영역 할당한다. 즉, chunk 내부 자료구조들을 갱신한다.
 3. 할당한 percpu에 대해 매핑이 되지 않은 가상 주소가 있다면 매핑한다.
 
-위와 같이 3단계를 거칠 것이다. 이러한 점을 숙지하며 코드를 살펴보자.
+위와 같이 3단계를 거친. 이러한 점을 숙지하며 코드를 살펴보자.
 
 {% tabs %}
 {% tab title="\_\_alloc\_percpu" %}
